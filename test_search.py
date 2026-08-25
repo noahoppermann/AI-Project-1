@@ -6,163 +6,185 @@ from romania_map import GRAPH
 
 from _expected_visible import EXPECTED
 
+# Every test gets its own 10-second limit, so a submission that loses a
+# visited-set check fails one category instead of hanging the whole suite.
+pytestmark = pytest.mark.timeout(10)
+
 ALGOS = ["bfs", "dfs", "ucs", "astar"]
-OPTIMAL = ["ucs", "astar"]
+PAIRS = sorted(EXPECTED)
+
+
+# --------------------------------------------------------------- helpers
+class Collector:
+    """Gather every failure in a category, then report them together.
+
+    One reported test per category, but the message still names exactly which
+    city pairs failed and why, so a student is never left guessing.
+    """
+
+    def __init__(self):
+        self.problems = []
+
+    def check(self, condition, message):
+        if not condition:
+            self.problems.append(message)
+
+    def compare(self, label, got, want):
+        if got != want:
+            self.problems.append(f"{label}: got {got!r}, expected {want!r}")
+
+    def report(self):
+        if not self.problems:
+            return
+        shown = self.problems[:6]
+        more = len(self.problems) - len(shown)
+        lines = [f"{len(self.problems)} problem(s) found:"]
+        lines += [f"  - {p}" for p in shown]
+        if more:
+            lines.append(f"  ... and {more} more of the same kind")
+        raise AssertionError("\n".join(lines))
 
 
 def run(alg, start, goal):
     return getattr(search, alg)(start, goal)
 
 
-def assert_valid_path(path, start, goal):
-    assert path is not None, "expected a path, got None"
-    assert path[0] == start, f"path must begin at {start}, began at {path[0]}"
-    assert path[-1] == goal, f"path must end at {goal}, ended at {path[-1]}"
-    assert len(set(path)) == len(path), f"path revisits a city: {path}"
+def path_problems(c, alg, start, goal, path, cost):
+    where = f"{alg} {start} -> {goal}"
+    if path is None:
+        c.check(False, f"{where}: returned None, expected a path")
+        return
+    if path[0] != start or path[-1] != goal:
+        c.check(False, f"{where}: path runs {path[0]} -> {path[-1]}")
+        return
+    if len(set(path)) != len(path):
+        c.check(False, f"{where}: path revisits a city")
+        return
     for a, b in zip(path, path[1:]):
-        assert b in GRAPH[a], f"no road from {a} to {b}"
+        if b not in GRAPH[a]:
+            c.check(False, f"{where}: no road from {a} to {b}")
+            return
+    walked = sum(GRAPH[a][b] for a, b in zip(path, path[1:]))
+    c.check(cost == walked, f"{where}: cost {cost} disagrees with its own path ({walked})")
+    c.check(float(cost).is_integer(),
+            f"{where}: cost {cost!r} is not a whole number - did the heuristic "
+            "leak into the path cost?")
+    c.compare(f"{where} path", path, EXPECTED[(start, goal)][alg][0])
+    c.compare(f"{where} cost", cost, EXPECTED[(start, goal)][alg][1])
 
 
-def declared_cost(path):
-    return sum(GRAPH[a][b] for a, b in zip(path, path[1:]))
+def check_algorithm(alg, expansions=True):
+    c = Collector()
+    for start, goal in PAIRS:
+        result = run(alg, start, goal)
+        if not (isinstance(result, tuple) and len(result) == 3):
+            c.check(False, f"{alg} {start} -> {goal}: did not return a 3-tuple")
+            continue
+        path, cost, expanded = result
+        path_problems(c, alg, start, goal, path, cost)
+        if expansions:
+            c.compare(f"{alg} {start} -> {goal} expansions",
+                      expanded, EXPECTED[(start, goal)][alg][2])
+    return c
 
 
-# --------------------------------------------------------------- structure
-@pytest.mark.parametrize("alg", ALGOS)
-def test_returns_triple(alg):
-    result = run(alg, "Arad", "Bucharest")
-    assert isinstance(result, tuple) and len(result) == 3, (
-        f"{alg} must return a 3-tuple (path, cost, expanded)")
+# ------------------------------------------------- 1. signatures and edges
+def test_signatures_and_edge_cases():
+    c = Collector()
+    for alg in ALGOS:
+        result = run(alg, "Arad", "Bucharest")
+        c.check(isinstance(result, tuple) and len(result) == 3,
+                f"{alg}: must return a 3-tuple (path, cost, expanded)")
+        c.compare(f"{alg}(Arad, Arad)", run(alg, "Arad", "Arad"), (["Arad"], 0, 0))
+        c.compare(f"{alg}(Arad, Atlantis)", run(alg, "Arad", "Atlantis"), (None, None, 0))
+    c.report()
 
 
-@pytest.mark.parametrize("alg", ALGOS)
-def test_start_equals_goal(alg):
-    path, cost, expanded = run(alg, "Arad", "Arad")
-    assert path == ["Arad"]
-    assert cost == 0
-    assert expanded == 0
-
-
-@pytest.mark.parametrize("alg", ALGOS)
-def test_unknown_city(alg):
-    assert run(alg, "Arad", "Atlantis") == (None, None, 0)
-
-
-# ------------------------------------------------------------- distances
+# --------------------------------------------------- 2. distance functions
 def test_distance_functions():
-    """The three distance helpers must agree with their definitions."""
     import numpy as np
+    c = Collector()
     a = np.array([0.0, 0.0])
     b = np.array([3.0, 4.0])
-    assert search.euclidean(a, b) == pytest.approx(5.0)
-    assert search.manhattan(a, b) == pytest.approx(7.0)
-    assert search.chebyshev(a, b) == pytest.approx(4.0)
-    assert search.euclidean(a, a) == pytest.approx(0.0)
+    c.check(abs(search.euclidean(a, b) - 5.0) < 1e-9,
+            f"euclidean((0,0),(3,4)) = {search.euclidean(a, b)!r}, expected 5.0")
+    c.check(abs(search.manhattan(a, b) - 7.0) < 1e-9,
+            f"manhattan((0,0),(3,4)) = {search.manhattan(a, b)!r}, expected 7.0")
+    c.check(abs(search.chebyshev(a, b) - 4.0) < 1e-9,
+            f"chebyshev((0,0),(3,4)) = {search.chebyshev(a, b)!r}, expected 4.0")
+    c.check(abs(search.euclidean(a, a)) < 1e-9, "euclidean of a point with itself must be 0")
 
-
-def test_coords_of_returns_array():
-    import numpy as np
     v = search.coords_of("Arad")
-    assert isinstance(v, np.ndarray), "coords_of must return a numpy array"
-    assert v.shape == (2,), "coords_of must return a length-2 array"
-    assert tuple(float(x) for x in v) == (0.0, 12.0)
+    c.check(isinstance(v, np.ndarray), "coords_of must return a numpy array")
+    c.check(getattr(v, "shape", None) == (2,), "coords_of must return a length-2 array")
+    c.check(tuple(float(x) for x in v) == (0.0, 12.0),
+            f"coords_of('Arad') = {tuple(v)!r}, expected (0.0, 12.0)")
 
-
-def test_heuristic_zero_at_goal():
     for city in ("Arad", "Bucharest", "Neamt"):
-        assert search.heuristic(city, city) == pytest.approx(0.0)
+        h = search.heuristic(city, city)
+        c.check(abs(h) < 1e-9, f"heuristic({city}, {city}) = {h!r}, must be 0.0")
+    c.report()
 
 
-# ---------------------------------------------------- heuristic is wired in
-def test_astar_actually_calls_heuristic():
-    """Swap in a zero heuristic; A* must then behave exactly like UCS."""
+# ------------------------------------------------------ 3, 4, 5. BFS/DFS/UCS
+def test_bfs():
+    check_algorithm("bfs").report()
+
+
+def test_dfs():
+    c = check_algorithm("dfs", expansions=False)
+    c.report()
+
+
+def test_ucs():
+    c = check_algorithm("ucs")
+    for start, goal in PAIRS:
+        _, cost, _ = run("ucs", start, goal)
+        best = min(EXPECTED[(start, goal)][a][1] for a in ALGOS)
+        c.check(cost == best, f"ucs {start} -> {goal}: cost {cost} is not optimal ({best})")
+    c.report()
+
+
+# --------------------------------------------------- 6. A* path and cost
+def test_astar_paths_are_optimal():
+    c = check_algorithm("astar", expansions=False)
+    for start, goal in PAIRS:
+        _, cost, _ = run("astar", start, goal)
+        want = EXPECTED[(start, goal)]["ucs"][1]
+        c.check(cost == want,
+                f"astar {start} -> {goal}: cost {cost}, optimal is {want}. An "
+                "inadmissible heuristic loses A*'s optimality guarantee.")
+    c.report()
+
+
+# ----------------------------------------------------- 7. A* expansions
+def test_astar_expansion_counts():
+    c = Collector()
+    for start, goal in PAIRS:
+        _, _, expanded = run("astar", start, goal)
+        allowed = EXPECTED[(start, goal)]["astar_expanded_ok"]
+        c.check(expanded in allowed,
+                f"astar {start} -> {goal}: expanded {expanded}, an admissible "
+                f"heuristic gives one of {allowed}")
+    c.report()
+
+
+# ------------------------------------------------ 8. A* uses the heuristic
+def test_astar_uses_heuristic():
+    c = Collector()
+    for start, goal in PAIRS:
+        _, _, e_ast = run("astar", start, goal)
+        _, _, e_ucs = run("ucs", start, goal)
+        c.check(e_ast < e_ucs,
+                f"astar {start} -> {goal}: expanded {e_ast}, ucs expanded "
+                f"{e_ucs}; A* must expand strictly fewer")
+
     original = search.heuristic
     try:
         search.heuristic = lambda city, goal: 0.0
-        for start, goal in sorted(EXPECTED):
-            assert run("astar", start, goal) == run("ucs", start, goal), (
-                "with h = 0, astar must reduce to ucs -- make sure astar "
-                "calls heuristic() rather than inlining the formula")
+        for start, goal in PAIRS:
+            c.compare(f"with h=0, astar {start} -> {goal} should equal ucs",
+                      run("astar", start, goal), run("ucs", start, goal))
     finally:
         search.heuristic = original
-
-
-# ------------------------------------------------------------ path & cost
-@pytest.mark.parametrize("start,goal", sorted(EXPECTED))
-@pytest.mark.parametrize("alg", ALGOS)
-def test_cost_is_integral(alg, start, goal):
-    """Costs are sums of integer road costs. A fractional cost means a
-    heuristic value leaked into your path cost."""
-    _, cost, _ = run(alg, start, goal)
-    assert float(cost).is_integer(), (
-        f"{alg} returned a non-integer cost {cost!r} -- did you add the "
-        "heuristic into the path cost instead of keeping them separate?")
-
-
-@pytest.mark.parametrize("start,goal", sorted(EXPECTED))
-@pytest.mark.parametrize("alg", ALGOS)
-def test_path_matches(alg, start, goal):
-    path, cost, _ = run(alg, start, goal)
-    assert_valid_path(path, start, goal)
-    assert cost == declared_cost(path), "returned cost disagrees with returned path"
-    assert path == EXPECTED[(start, goal)][alg][0]
-    assert cost == EXPECTED[(start, goal)][alg][1]
-
-
-@pytest.mark.parametrize("start,goal", sorted(EXPECTED))
-@pytest.mark.parametrize("alg", OPTIMAL)
-def test_optimal_cost(alg, start, goal):
-    _, cost, _ = run(alg, start, goal)
-    best = min(EXPECTED[(start, goal)][a][1] for a in ALGOS)
-    assert cost == best, f"{alg} must return an optimal-cost path"
-
-
-@pytest.mark.parametrize("start,goal", sorted(EXPECTED))
-def test_astar_path_is_optimal(start, goal):
-    """An inadmissible heuristic can return a cheap-looking but suboptimal
-    path. This is where a poor choice of heuristic shows up."""
-    path, cost, _ = run("astar", start, goal)
-    assert_valid_path(path, start, goal)
-    assert cost == EXPECTED[(start, goal)]["ucs"][1], (
-        "A* returned a suboptimal path. If your heuristic can overestimate "
-        "the true remaining cost, A* loses its optimality guarantee.")
-
-
-# ------------------------------------------------------------- expansions
-@pytest.mark.parametrize("start,goal", sorted(EXPECTED))
-@pytest.mark.parametrize("alg", ["bfs", "ucs"])
-def test_expansion_count(alg, start, goal):
-    """BFS and UCS expansions involve no heuristic, so these are exact."""
-    _, _, expanded = run(alg, start, goal)
-    assert expanded == EXPECTED[(start, goal)][alg][2], (
-        f"{alg} expanded {expanded} nodes, expected "
-        f"{EXPECTED[(start, goal)][alg][2]}; see the handout for how to count")
-
-
-@pytest.mark.parametrize("start,goal", sorted(EXPECTED))
-def test_astar_expansion_count(start, goal):
-    """A* expansions depend on which admissible heuristic you chose, so any
-    permitted admissible choice is accepted -- but the count must match one
-    of them exactly, not merely be small."""
-    _, _, expanded = run("astar", start, goal)
-    allowed = EXPECTED[(start, goal)]["astar_expanded_ok"]
-    assert expanded in allowed, (
-        f"A* expanded {expanded} nodes on {start} -> {goal}. An admissible "
-        f"heuristic on this map gives one of {allowed}. Check your goal test "
-        "placement and that you skip nodes already expanded.")
-
-
-@pytest.mark.parametrize("start,goal", sorted(EXPECTED))
-def test_astar_beats_ucs(start, goal):
-    """Any admissible heuristic must beat UCS on these pairs."""
-    _, _, e_ucs = run("ucs", start, goal)
-    _, _, e_ast = run("astar", start, goal)
-    assert e_ast < e_ucs, (
-        f"A* expanded {e_ast} nodes, UCS expanded {e_ucs}. A* must expand "
-        "strictly fewer -- is your heuristic actually being used?")
-
-
-@pytest.mark.parametrize("start,goal", sorted(EXPECTED))
-def test_dfs_is_not_bfs(start, goal):
-    """DFS must follow the stack discipline, not rediscover BFS."""
-    assert run("dfs", start, goal)[0] == EXPECTED[(start, goal)]["dfs"][0]
+    c.report()
